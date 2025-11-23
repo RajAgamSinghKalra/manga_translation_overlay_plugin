@@ -48,7 +48,7 @@ function App() {
     // Existing translation logic unchanged
     setStatus('loading');
     setProgress(0);
-    addLog('info', `Starting translation: ${sourceLang} → ${targetLang}`);
+    addLog('info', `Starting translation: ${sourceLang} -> ${targetLang}`);
 
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -231,7 +231,7 @@ function App() {
           </span>
           <button
             onClick={async () => {
-              addLog('info', modelReady ? 'Re‑downloading model...' : 'Downloading model...');
+              addLog('info', modelReady ? 'Re-downloading model...' : 'Downloading model...');
               try {
                 if (modelReady) {
                   await forceDownloadModel();
@@ -248,7 +248,7 @@ function App() {
             }}
             className="ml-2 px-2 py-1 bg-purple-600 hover:bg-purple-500 text-xs rounded"
           >
-            {modelReady ? 'Re‑download' : 'Download'}
+            {modelReady ? 'Re-download' : 'Download'}
           </button>
           <div className={`w-2 h-2 rounded-full shadow-[0_0_10px_rgba(34,197,94,0.5)] ${status === 'error' ? 'bg-red-500' : 'bg-green-500'}`}></div>
         </div>
@@ -292,7 +292,7 @@ function App() {
       )}
 
       <div className="mt-3 text-center">
-        <p className="text-xs text-gray-500">Offline Mode • WebGPU Enabled</p>
+        <p className="text-xs text-gray-500">Offline Mode - WebGPU Enabled</p>
       </div>
     </div>
   );

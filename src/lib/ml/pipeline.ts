@@ -2,11 +2,15 @@
 import { pipeline, env } from '@xenova/transformers';
 import Tesseract from 'tesseract.js';
 
-// Configure Transformers.js to use browser cache for models
+// Configure Transformers.js to use browser cache for models (only used as a last-resort fallback)
 env.useBrowserCache = true;
 // Rely on remote hosted models (HuggingFace) so we don't accidentally try to
 // pull relative to the website (eg: https://<page>/models/...)
 env.allowLocalModels = false;
+// Suppress noisy ONNXRuntime warnings about pruned initializers; keep real errors visible.
+if (env.backends?.onnx) {
+    env.backends.onnx.logLevel = 'error';
+}
 // Don't set cacheDir - let Transformers.js handle caching via IndexedDB/Cache API
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -26,41 +30,36 @@ const LANG_MAP: Record<string, string> = {
 };
 
 export async function initTranslator() {
-    if (!translator) {
-        try {
-            console.log('Loading translation model (m2m100_418M - lighter & faster)...');
-            console.log('This may download ~160MB on first use, please wait...');
-
-            // Use a smaller, faster model that's better for browser use
-            // m2m100_418M is much smaller than nllb (160MB vs 600MB)
-            translator = await pipeline('translation', 'Xenova/m2m100_418M');
-
-            console.log('Translation model loaded successfully!');
-        } catch (error) {
-            console.error('Failed to load translation model:', error);
-            throw error;
-        }
-    }
+    // Only used if remote translation fails; avoid initializing by default to spare GPU/CPU.
+    if (translator) return translator;
+    console.log('Loading local fallback translation model (only if remote fails)...');
+    translator = await pipeline('translation', 'Xenova/m2m100_418M');
+    console.log('Local fallback model loaded.');
     return translator;
 }
 
 export async function translateText(text: string, source: string, target: string) {
     try {
-        console.log('Initializing translator...');
-        const model = await initTranslator();
-        console.log('Translator initialized.');
-
         const srcLang = LANG_MAP[source] || source;
         const tgtLang = LANG_MAP[target] || target;
 
         console.log(`Translating from ${srcLang} to ${tgtLang}: "${text}"`);
 
+        // Prefer free remote translator to avoid local GPU/CPU.
+        try {
+            const remote = await translateViaLibre(text, srcLang, tgtLang);
+            if (remote) return remote;
+        } catch (remoteErr) {
+            console.warn('Remote translation failed, trying local fallback...', remoteErr);
+        }
+
+        // Fallback to local model only if remote fails.
+        const model = await initTranslator();
         const output = await model(text, {
             src_lang: srcLang,
             tgt_lang: tgtLang,
         });
-
-        console.log('Translation output:', output);
+        console.log('Translation output (local fallback):', output);
         return output[0].translation_text;
     } catch (error) {
         console.error('Translation error:', error);
@@ -68,11 +67,43 @@ export async function translateText(text: string, source: string, target: string
     }
 }
 
+async function translateViaLibre(text: string, source: string, target: string): Promise<string | null> {
+    const body = {
+        q: text,
+        source,
+        target,
+        format: 'text',
+        api_key: '',
+    };
+    const resp = await fetch('https://libretranslate.de/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+        throw new Error(`LibreTranslate HTTP ${resp.status}`);
+    }
+    const json = await resp.json();
+    if (json?.translatedText) return json.translatedText as string;
+    return null;
+}
+
+const TESS_LANG_MAP: Record<string, string> = {
+    jp: 'jpn',
+    ja: 'jpn',
+    en: 'eng',
+    cn: 'chi_sim',
+    zh: 'chi_sim',
+    kr: 'kor',
+    ko: 'kor',
+};
+
 export async function performOCR(imageBlob: Blob | string, lang: string = 'jpn') {
-    console.log(`Performing OCR (${lang})...`);
+    const tessLang = TESS_LANG_MAP[lang] || lang || 'eng';
+    console.log(`Performing OCR (${tessLang})...`);
 
     try {
-        const worker = await Tesseract.createWorker(lang, 1, {
+        const worker = await Tesseract.createWorker(tessLang, 1, {
             workerPath: chrome.runtime.getURL('tesseract/worker.min.js'),
             corePath: chrome.runtime.getURL('tesseract/tesseract-core.wasm.js'),
             langPath: chrome.runtime.getURL('tesseract/lang-data'),
