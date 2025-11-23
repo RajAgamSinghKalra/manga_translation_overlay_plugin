@@ -11,6 +11,9 @@
         "scripting",
         "storage"
     ],
+    "host_permissions": [
+        "https://libretranslate.de/*"
+    ],
     "background": {
         "service_worker": "src/background/index.ts",
         "type": "module"

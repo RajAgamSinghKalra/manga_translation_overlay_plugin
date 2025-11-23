@@ -9,8 +9,9 @@ env.useBrowserCache = true;
 env.allowLocalModels = false;
 // Suppress noisy ONNXRuntime warnings about pruned initializers; keep real errors visible.
 if (env.backends?.onnx) {
-    env.backends.onnx.logLevel = 'error';
+    env.backends.onnx.logLevel = 'fatal';
 }
+
 // Don't set cacheDir - let Transformers.js handle caching via IndexedDB/Cache API
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -68,24 +69,24 @@ export async function translateText(text: string, source: string, target: string
 }
 
 async function translateViaLibre(text: string, source: string, target: string): Promise<string | null> {
-    const body = {
-        q: text,
-        source,
-        target,
-        format: 'text',
-        api_key: '',
-    };
-    const resp = await fetch('https://libretranslate.de/translate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+    return new Promise((resolve) => {
+        chrome.runtime.sendMessage({
+            action: 'TRANSLATE_REMOTE',
+            payload: { text, source, target }
+        }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.warn('Background script not reachable:', chrome.runtime.lastError);
+                resolve(null);
+                return;
+            }
+            if (response && response.success) {
+                resolve(response.data);
+            } else {
+                console.warn('Remote translation error:', response?.error);
+                resolve(null);
+            }
+        });
     });
-    if (!resp.ok) {
-        throw new Error(`LibreTranslate HTTP ${resp.status}`);
-    }
-    const json = await resp.json();
-    if (json?.translatedText) return json.translatedText as string;
-    return null;
 }
 
 const TESS_LANG_MAP: Record<string, string> = {
