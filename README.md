@@ -1,73 +1,44 @@
-# React + TypeScript + Vite
+# Manga Translator Extension
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A local, offline-capable Chrome extension for translating manga using AI.
 
-Currently, two official plugins are available:
+## Installation
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+1. **Build the extension** (if not already built):
+   ```bash
+   npm run build
+   ```
 
-## React Compiler
+2. **Load in Chrome**:
+   - Open `chrome://extensions/`
+   - Enable **Developer mode** (toggle in top-right corner)
+   - Click **Load unpacked**
+   - **IMPORTANT**: Navigate to and select the **`dist`** folder inside this project directory
+     - Correct path: `d:\the_code\translation plugin\dist`
+     - ⚠️ Do NOT select the root project folder!
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+3. **Verify**:
+   - The extension should load without errors
+   - You should see "Manga Translator (Local)" in your extensions list
 
-## Expanding the ESLint configuration
+## Usage
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+1. Navigate to a webpage with manga images
+2. Click the extension icon
+3. Select source language (e.g., Japanese) and target language (e.g., English)
+4. Click "Translate Page"
+5. Wait for the translation to complete (first run downloads models, ~1GB)
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## Features
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+- ✅ Local OCR with Tesseract.js
+- ✅ Local translation with Transformers.js (NLLB-200)
+- ✅ Offline capable (after first model download)
+- ✅ Modern glassmorphism UI
+- ✅ Cross-browser compatible manifest
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+## Troubleshooting
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+**Error: "Invalid script mime type" or "Service worker registration failed"**
+- Make sure you're loading the **`dist`** folder, not the root project folder
+- The manifest in the `dist` folder has the correct compiled JavaScript paths

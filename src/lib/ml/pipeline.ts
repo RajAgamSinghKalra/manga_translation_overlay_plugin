@@ -3,8 +3,9 @@ import { pipeline, env } from '@xenova/transformers';
 import Tesseract from 'tesseract.js';
 
 // Configure Transformers.js
-env.allowLocalModels = false;
+env.allowLocalModels = true;
 env.useBrowserCache = true;
+env.cacheDir = 'models'; // Cache models in extension's 'models' directory
 
 let translator: any = null;
 
@@ -44,14 +45,24 @@ export async function translateText(text: string, source: string, target: string
 export async function performOCR(imageBlob: Blob | string, lang: string = 'jpn') {
     console.log(`Performing OCR (${lang})...`);
 
-    const worker = await Tesseract.createWorker(lang, 1, {
-        workerPath: chrome.runtime.getURL('tesseract/worker.min.js'),
-        corePath: chrome.runtime.getURL('tesseract/tesseract-core.wasm.js'),
-        logger: m => console.log(m),
-    });
+    try {
+        const worker = await Tesseract.createWorker(lang, 1, {
+            workerPath: chrome.runtime.getURL('tesseract/worker.min.js'),
+            corePath: chrome.runtime.getURL('tesseract/tesseract-core.wasm.js'),
+            langPath: chrome.runtime.getURL('tesseract/lang-data'),
+            gzip: false, // Use local uncompressed files, don't try to fetch .gz from CDN
+            logger: m => console.log(m),
+        });
 
-    const ret = await worker.recognize(imageBlob);
-    console.log('OCR Complete', ret.data);
-    await worker.terminate();
-    return ret.data;
+        const ret = await worker.recognize(imageBlob);
+        console.log('OCR Complete', ret.data);
+        await worker.terminate();
+        return ret.data;
+    } catch (error) {
+        console.error('OCR Error:', error);
+        console.error('Worker path:', chrome.runtime.getURL('tesseract/worker.min.js'));
+        console.error('Core path:', chrome.runtime.getURL('tesseract/tesseract-core.wasm.js'));
+        console.error('Lang path:', chrome.runtime.getURL('tesseract/lang-data'));
+        throw error;
+    }
 }

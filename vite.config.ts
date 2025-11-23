@@ -25,4 +25,9 @@ export default defineConfig({
       },
     },
   },
+  define: {
+    // Fix for transformers.js and other libraries using import.meta
+    // Content scripts can't use import.meta, so we replace it
+    'import.meta.url': JSON.stringify(''),
+  },
 })

@@ -1,30 +1,113 @@
 /// <reference types="chrome" />
-import { useState } from 'react';
-import { Languages, Zap, Download, Settings } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Languages, Zap, Download, Terminal } from 'lucide-react';
+
+interface LogEntry {
+  timestamp: string;
+  level: 'info' | 'warn' | 'error' | 'success';
+  message: string;
+}
 
 function App() {
   const [status, setStatus] = useState('idle'); // idle, loading, translating, done, error
   const [progress, setProgress] = useState(0);
   const [sourceLang, setSourceLang] = useState('jp');
   const [targetLang, setTargetLang] = useState('en');
+  const [showConsole, setShowConsole] = useState(true); // Enabled by default
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const consoleEndRef = useRef<HTMLDivElement>(null);
+
+  const addLog = (level: LogEntry['level'], message: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setLogs(prev => [...prev, { timestamp, level, message }]);
+  };
+
+  useEffect(() => {
+    consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
+
+  useEffect(() => {
+    addLog('info', 'Extension popup loaded');
+  }, []);
 
   const handleTranslate = async () => {
     setStatus('loading');
+    setProgress(0);
+    addLog('info', `Starting translation: ${sourceLang} → ${targetLang}`);
+
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab.id) {
-        chrome.tabs.sendMessage(tab.id, {
+      addLog('info', `Active tab: ${tab.title}`);
+
+      if (!tab.id) {
+        addLog('error', 'No active tab ID found');
+        setStatus('error');
+        return;
+      }
+
+      let retryCount = 0;
+      const maxRetries = 3;
+
+      const sendMessage = async () => {
+        if (retryCount >= maxRetries) {
+          addLog('error', `Failed after ${maxRetries} attempts. Please refresh the page and try again.`);
+          setStatus('error');
+          return;
+        }
+
+        addLog('info', `Sending message to content script... (attempt ${retryCount + 1}/${maxRetries})`);
+        chrome.tabs.sendMessage(tab.id!, {
           action: 'TRANSLATE_PAGE',
           source: sourceLang,
           target: targetLang
-        }, (response) => {
+        }, async (response) => {
           if (chrome.runtime.lastError) {
-            console.error(chrome.runtime.lastError);
-            setStatus('error');
+            const errorMsg = chrome.runtime.lastError.message;
+
+            // If content script not loaded, inject it
+            if (errorMsg?.includes('Receiving end does not exist')) {
+              if (retryCount === 0) {
+                addLog('info', 'Content script not loaded, injecting...');
+                retryCount++;
+
+                try {
+                  // Get the content script file from manifest
+                  const manifest = chrome.runtime.getManifest();
+                  const contentScripts = manifest.content_scripts?.[0]?.js || [];
+
+                  if (contentScripts.length === 0) {
+                    addLog('error', 'No content script found in manifest');
+                    setStatus('error');
+                    return;
+                  }
+
+                  await chrome.scripting.executeScript({
+                    target: { tabId: tab.id! },
+                    files: contentScripts
+                  });
+
+                  addLog('success', 'Content script injected successfully');
+                  // Wait longer for script to initialize
+                  setTimeout(() => sendMessage(), 500);
+                } catch (err: any) {
+                  addLog('error', `Injection failed: ${err.message}`);
+                  addLog('error', 'This page may not allow content scripts (e.g., chrome:// pages)');
+                  setStatus('error');
+                }
+              } else {
+                // Already injected once, something else is wrong
+                addLog('error', 'Content script was injected but still not responding');
+                addLog('error', 'Try: 1) Refresh the page, 2) Reload extension');
+                setStatus('error');
+              }
+            } else {
+              addLog('error', `Chrome error: ${errorMsg}`);
+              setStatus('error');
+            }
           } else {
-            console.log(response);
+            addLog('success', `Content script responded: ${JSON.stringify(response)}`);
             setStatus('translating');
-            // Simulate progress for demo
+
             let p = 0;
             const interval = setInterval(() => {
               p += 10;
@@ -32,38 +115,54 @@ function App() {
               if (p >= 100) {
                 clearInterval(interval);
                 setStatus('done');
+                addLog('success', 'Translation completed!');
               }
             }, 500);
           }
         });
-      }
+      };
+
+      sendMessage();
     } catch (e) {
-      console.error(e);
+      addLog('error', `Exception: ${e instanceof Error ? e.message : String(e)}`);
       setStatus('error');
     }
   };
 
+  const getLevelColor = (level: LogEntry['level']) => {
+    switch (level) {
+      case 'error': return 'text-red-400';
+      case 'warn': return 'text-yellow-400';
+      case 'success': return 'text-green-400';
+      default: return 'text-gray-300';
+    }
+  };
+
   return (
-    <div className="w-[350px] min-h-[400px] bg-gray-900 text-white p-4 font-sans relative overflow-hidden">
+    <div className="w-[400px] min-h-[500px] bg-gray-900 text-white p-4 font-sans relative overflow-hidden flex flex-col">
       {/* Background Gradients */}
       <div className="absolute top-[-50px] left-[-50px] w-40 h-40 bg-purple-600 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob"></div>
       <div className="absolute top-[-50px] right-[-50px] w-40 h-40 bg-blue-600 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob animation-delay-2000"></div>
 
       {/* Header */}
-      <header className="flex justify-between items-center mb-6 relative z-10">
+      <header className="flex justify-between items-center mb-4 relative z-10">
         <div className="flex items-center gap-2">
           <Languages className="w-6 h-6 text-purple-400" />
           <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-400">
             MangaTL
           </h1>
         </div>
-        <button className="p-2 hover:bg-white/10 rounded-full transition-colors">
-          <Settings className="w-5 h-5 text-gray-400" />
+        <button
+          onClick={() => setShowConsole(!showConsole)}
+          className={`p-2 rounded-full transition-colors ${showConsole ? 'bg-purple-600/30 text-purple-400' : 'hover:bg-white/10 text-gray-400'}`}
+          title="Toggle Debug Console"
+        >
+          <Terminal className="w-5 h-5" />
         </button>
       </header>
 
       {/* Main Card */}
-      <div className="bg-white/5 backdrop-blur-lg border border-white/10 rounded-2xl p-4 mb-4 relative z-10 shadow-xl">
+      <div className="bg-white/5 backdrop-blur-lg border border-white/10 rounded-2xl p-4 mb-3 relative z-10 shadow-xl">
         <div className="flex justify-between items-center mb-4">
           <div className="flex-1">
             <label className="text-xs text-gray-400 uppercase tracking-wider mb-1 block">From</label>
@@ -109,11 +208,11 @@ function App() {
       </div>
 
       {/* Status / Models */}
-      <div className="bg-white/5 backdrop-blur-md border border-white/10 rounded-xl p-3 relative z-10">
+      <div className="bg-white/5 backdrop-blur-md border border-white/10 rounded-xl p-3 mb-3 relative z-10">
         <div className="flex items-center justify-between mb-2">
           <span className="text-sm text-gray-300 flex items-center gap-2">
             <Download className="w-4 h-4 text-green-400" />
-            {status === 'idle' ? 'Ready' : status === 'done' ? 'Completed' : 'Processing...'}
+            {status === 'idle' ? 'Ready' : status === 'done' ? 'Completed' : status === 'error' ? 'Error' : 'Processing...'}
           </span>
           <div className={`w-2 h-2 rounded-full shadow-[0_0_10px_rgba(34,197,94,0.5)] ${status === 'error' ? 'bg-red-500' : 'bg-green-500'}`}></div>
         </div>
@@ -125,7 +224,38 @@ function App() {
         </div>
       </div>
 
-      <div className="mt-4 text-center">
+      {/* Debug Console */}
+      {showConsole && (
+        <div className="bg-black/40 backdrop-blur-sm border border-white/10 rounded-xl p-3 relative z-10 flex-1 flex flex-col min-h-[200px]">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-purple-400" />
+              <span className="text-xs font-semibold text-purple-400 uppercase tracking-wider">Debug Console</span>
+            </div>
+            <button
+              onClick={() => setLogs([])}
+              className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto font-mono text-xs space-y-1 max-h-[200px]">
+            {logs.length === 0 ? (
+              <div className="text-gray-500 italic">No logs yet...</div>
+            ) : (
+              logs.map((log, idx) => (
+                <div key={idx} className="flex gap-2">
+                  <span className="text-gray-600">[{log.timestamp}]</span>
+                  <span className={getLevelColor(log.level)}>{log.message}</span>
+                </div>
+              ))
+            )}
+            <div ref={consoleEndRef} />
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3 text-center">
         <p className="text-xs text-gray-500">Offline Mode • WebGPU Enabled</p>
       </div>
     </div>

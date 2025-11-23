@@ -31,7 +31,8 @@
             "resources": [
                 "assets/*",
                 "*.wasm",
-                "*.onnx"
+                "*.onnx",
+                "tesseract/*"
             ],
             "matches": [
                 "<all_urls>"
