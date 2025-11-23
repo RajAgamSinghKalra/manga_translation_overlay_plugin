@@ -54,57 +54,50 @@ async function processImage(img: HTMLImageElement, sourceLang: string, targetLan
 
         // 1. OCR
         const ocrResult = await performOCR(imageUrl, sourceLang);
+        console.log('OCR Result:', ocrResult);
 
-        // 2. Process blocks
-        // Tesseract blocks might be too large (paragraphs). We might want lines or words.
-        // blocks -> paragraphs -> lines.
-        // Let's iterate over paragraphs or lines.
-
-        // Using paragraphs for now
-        if (ocrResult && ocrResult.blocks) {
-            for (const block of ocrResult.blocks) {
-                if (block.confidence < 50) continue; // Skip low confidence
-
-                const bbox = block.bbox;
-                const scaleX = img.width / img.naturalWidth;
-                const scaleY = img.height / img.naturalHeight;
-
-                const box = document.createElement('div');
-                box.style.position = 'absolute';
-                box.style.left = `${bbox.x0 * scaleX}px`;
-                box.style.top = `${bbox.y0 * scaleY}px`;
-                box.style.width = `${(bbox.x1 - bbox.x0) * scaleX}px`;
-                box.style.height = `${(bbox.y1 - bbox.y0) * scaleY}px`;
-                box.style.backgroundColor = 'white';
-                box.style.color = 'black';
-                box.style.fontSize = '14px';
-                box.style.fontFamily = 'Comic Sans MS, sans-serif'; // Manga style
-                box.style.fontWeight = 'bold';
-                box.style.display = 'flex';
-                box.style.alignItems = 'center';
-                box.style.justifyContent = 'center';
-                box.style.textAlign = 'center';
-                box.style.zIndex = '10000';
-                box.style.padding = '2px';
-                box.style.boxSizing = 'border-box';
-                box.style.lineHeight = '1.2';
-                box.style.pointerEvents = 'auto'; // Allow selecting text
-                box.innerText = '...'; // Loading
-
-                overlay.appendChild(box);
-
-                // 3. Translate
-                // Clean text (remove newlines etc)
-                const cleanText = block.text.replace(/\s+/g, ' ').trim();
-                if (cleanText.length > 0) {
-                    const translatedText = await translateText(cleanText, sourceLang, targetLang);
-                    box.innerText = translatedText;
-                } else {
-                    box.remove();
-                }
-            }
+        // 2. Check if we got any text
+        if (!ocrResult || !ocrResult.text || ocrResult.text.trim().length === 0) {
+            console.log('No text detected in image');
+            URL.revokeObjectURL(imageUrl);
+            return;
         }
 
+        // 3. Translate the full text
+        console.log('Translating text...');
+        const cleanText = ocrResult.text.replace(/\s+/g, ' ').trim();
+        console.log('Clean text to translate:', cleanText);
+
+        let translatedText: string;
+        try {
+            translatedText = await translateText(cleanText, sourceLang, targetLang);
+            console.log('Translation complete:', translatedText);
+        } catch (error) {
+            console.error('Translation failed:', error);
+            URL.revokeObjectURL(imageUrl);
+            return;
+        }
+
+        // 4. Display as a simple overlay
+        const box = document.createElement('div');
+        box.style.position = 'absolute';
+        box.style.left = '10px';
+        box.style.top = '10px';
+        box.style.right = '10px';
+        box.style.backgroundColor = 'rgba(255, 255, 255, 0.9)';
+        box.style.color = 'black';
+        box.style.fontSize = '14px';
+        box.style.fontFamily = 'Arial, sans-serif';
+        box.style.fontWeight = 'bold';
+        box.style.padding = '10px';
+        box.style.zIndex = '10000';
+        box.style.borderRadius = '5px';
+        box.style.boxShadow = '0 2px 8px rgba(0,0,0,0.3)';
+        box.style.maxHeight = 'calc(100% - 20px)';
+        box.style.overflow = 'auto';
+        box.innerText = translatedText;
+
+        overlay.appendChild(box);
         URL.revokeObjectURL(imageUrl);
 
     } catch (e) {
