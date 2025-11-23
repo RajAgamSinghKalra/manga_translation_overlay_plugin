@@ -1,6 +1,6 @@
 console.log('Manga Translator Background Script Loaded');
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     if (request.action === 'TRANSLATE_REMOTE') {
         const { text, source, target } = request.payload;
 
