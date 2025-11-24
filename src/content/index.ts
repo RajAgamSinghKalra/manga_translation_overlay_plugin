@@ -33,33 +33,61 @@ type OverlayAnchor = {
 function createOverlayAnchor(img: HTMLImageElement): OverlayAnchor {
   const el = document.createElement('div');
   el.className = 'manga-tl-overlay';
-  el.style.position = 'fixed';
+  el.style.position = 'absolute';
   el.style.pointerEvents = 'none';
   el.style.zIndex = '2147483647';
   el.style.border = '2px solid #a855f7';
+  el.style.boxSizing = 'border-box';
+  el.style.top = '0';
+  el.style.left = '0';
+  el.style.transformOrigin = 'top left';
+  el.style.willChange = 'transform, width, height';
+  el.style.contain = 'layout paint size';
+  el.style.userSelect = 'none';
+  el.style.overflow = 'hidden';
   document.body.appendChild(el);
 
   let rafId: number | null = null;
+  const resizeObserver = new ResizeObserver(() => syncOnce());
 
-  const sync = () => {
+  const syncBounds = () => {
     const rect = img.getBoundingClientRect();
-    el.style.top = `${rect.top}px`;
-    el.style.left = `${rect.left}px`;
+    const pageLeft = rect.left + window.scrollX;
+    const pageTop = rect.top + window.scrollY;
+    el.style.transform = `translate3d(${pageLeft}px, ${pageTop}px, 0)`;
     el.style.width = `${rect.width}px`;
     el.style.height = `${rect.height}px`;
   };
 
+  let pending = false;
+  const syncOnce = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      syncBounds();
+    });
+  };
+
   const loop = () => {
-    sync();
+    syncBounds();
     rafId = requestAnimationFrame(loop);
   };
   rafId = requestAnimationFrame(loop);
+  resizeObserver.observe(img);
+
+  const onScrollOrResize = () => syncOnce();
+  window.addEventListener('scroll', onScrollOrResize, true);
+  window.addEventListener('resize', onScrollOrResize, true);
 
   const dispose = () => {
     if (rafId !== null) {
       cancelAnimationFrame(rafId);
       rafId = null;
     }
+    resizeObserver.disconnect();
+    window.removeEventListener('scroll', onScrollOrResize, true);
+    window.removeEventListener('resize', onScrollOrResize, true);
     el.remove();
   };
 
@@ -75,8 +103,21 @@ async function processImage(img: HTMLImageElement, sourceLang: string, targetLan
     }
   }
 
+  const layoutReady = await waitForLayout(img);
+  if (!layoutReady) {
+    console.warn('Image layout never stabilized, skipping', img.src);
+    return;
+  }
+
   const overlayAnchor = createOverlayAnchor(img);
   const overlay = overlayAnchor.element;
+
+  const overlayReady = await waitForOverlay(overlay);
+  if (!overlayReady) {
+    console.warn('Overlay has zero size, skipping image (layout not ready).', img.src);
+    overlayAnchor.dispose();
+    return;
+  }
 
   let objectUrl: string | null = null;
   let success = false;
@@ -108,11 +149,7 @@ async function processImage(img: HTMLImageElement, sourceLang: string, targetLan
 
     // Build per-block overlays so translated text sits over the source bubbles.
     const blocks = extractBlocks(ocrResult);
-    const imageSize = (ocrResult as any)?.imageSize;
-    const sourceWidth = imageSize?.width || img.naturalWidth || overlay.clientWidth;
-    const sourceHeight = imageSize?.height || img.naturalHeight || overlay.clientHeight;
-    const scaleX = overlay.clientWidth / sourceWidth;
-    const scaleY = overlay.clientHeight / sourceHeight;
+    const { scaleX, scaleY, sourceWidth, sourceHeight } = getScaleFactors(ocrResult, img, overlay);
 
     if (blocks.length === 0) {
       // Strict Fallback: Don't translate if confidence is low or text is garbage
@@ -143,10 +180,11 @@ async function processImage(img: HTMLImageElement, sourceLang: string, targetLan
       for (const result of results) {
         if (!result) continue;
         const { block, translatedText } = result;
-        const x = block.bbox.x0 * scaleX;
-        const y = block.bbox.y0 * scaleY;
-        const w = (block.bbox.x1 - block.bbox.x0) * scaleX;
-        const h = (block.bbox.y1 - block.bbox.y0) * scaleY;
+        const inflated = inflateBBox(block.bbox, sourceWidth, sourceHeight);
+        const x = inflated.x0 * scaleX;
+        const y = inflated.y0 * scaleY;
+        const w = (inflated.x1 - inflated.x0) * scaleX;
+        const h = (inflated.y1 - inflated.y0) * scaleY;
         const isVertical = h > w * 1.4;
         overlay.appendChild(makeOverlayBox(x, y, w, translatedText, h, overlay.clientWidth, overlay.clientHeight, isVertical));
       }
@@ -205,10 +243,11 @@ function extractBlocks(ocrResult: any) {
         bbox: item?.bbox,
         text: normalize(item?.text),
         confidence: item?.confidence ?? item?.conf ?? 0,
+        level: item?.level,
       }))
       .filter(b => {
         if (b.text.length === 0 || !b.bbox) return false;
-        if (b.confidence < 30) {
+        if (b.confidence < 20) {
           console.log('Filtered block (low confidence):', b.text, b.confidence);
           return false;
         }
@@ -220,24 +259,18 @@ function extractBlocks(ocrResult: any) {
         const w = b.bbox.x1 - b.bbox.x0;
         const h = b.bbox.y1 - b.bbox.y0;
 
-        // 1. Size Limit: Ignore blocks covering > 50% of the image area
+        // 1. Size Limit: Ignore blocks covering > 80% of the image area
         const blockArea = w * h;
         const imgArea = imgWidth * imgHeight;
-        if (blockArea > (imgArea * 0.5)) {
+        if (blockArea > (imgArea * 0.8)) {
           console.log('Filtered block (too large):', b.text);
           return false;
         }
 
-        // 2. Edge Filtering: Ignore blocks touching the very edges (often borders)
-        // Allow a small margin of error (e.g., 2px)
-        if (b.bbox.x0 <= 2 || b.bbox.y0 <= 2 || b.bbox.x1 >= imgWidth - 2 || b.bbox.y1 >= imgHeight - 2) {
-          return false;
-        }
-
-        // 3. Aspect Ratio: Ignore extremely thin/tall blocks
+        // 2. Aspect Ratio: Ignore extremely thin/tall blocks
         if (w > 0 && h > 0) {
           const ratio = w / h;
-          if (ratio > 20 || ratio < 0.05) return false;
+          if (ratio > 60 || ratio < 0.02) return false;
         }
 
         return true;
@@ -246,15 +279,34 @@ function extractBlocks(ocrResult: any) {
 
   const data = ocrResult || {};
 
-  // Prioritize larger blocks (paragraphs/blocks) to capture full speech bubbles
-  // instead of fragmented words.
-  let items = mapItems(data.paragraphs);
-  if (items.length === 0) items = mapItems(data.blocks);
+  // Prefer blocks -> paragraphs -> lines; only fall back to words as a last resort.
+  let items = mapItems(data.blocks);
+  if (items.length === 0) items = mapItems(data.paragraphs);
   if (items.length === 0) items = mapItems(data.lines);
-  // Only fall back to words if absolutely nothing else was found, but usually words are too fragmented.
   if (items.length === 0) items = mapItems(data.words);
 
   return items;
+}
+
+function getScaleFactors(ocrResult: any, img: HTMLImageElement, overlay: HTMLDivElement) {
+  const imageSize = (ocrResult as any)?.imageSize;
+  const sourceWidth = imageSize?.width || img.naturalWidth || overlay.clientWidth || 1;
+  const sourceHeight = imageSize?.height || img.naturalHeight || overlay.clientHeight || 1;
+  const scaleX = overlay.clientWidth / sourceWidth;
+  const scaleY = overlay.clientHeight / sourceHeight;
+  return { scaleX, scaleY, sourceWidth, sourceHeight };
+}
+
+function inflateBBox(bbox: { x0: number; y0: number; x1: number; y1: number }, imgW: number, imgH: number) {
+  const w = bbox.x1 - bbox.x0;
+  const h = bbox.y1 - bbox.y0;
+  // Expand box slightly to fully cover the speech bubble while keeping it clamped to the image.
+  const pad = Math.max(6, Math.min(w, h) * 0.08);
+  const x0 = Math.max(0, bbox.x0 - pad);
+  const y0 = Math.max(0, bbox.y0 - pad);
+  const x1 = Math.min(imgW, bbox.x1 + pad);
+  const y1 = Math.min(imgH, bbox.y1 + pad);
+  return { x0, y0, x1, y1 };
 }
 
 function makeOverlayBox(x: number, y: number, width: number, text: string, minHeight?: number, containerWidth?: number, containerHeight?: number, vertical?: boolean) {
@@ -281,6 +333,8 @@ function makeOverlayBox(x: number, y: number, width: number, text: string, minHe
   box.style.borderRadius = '6px';
   box.style.boxShadow = '0 2px 8px rgba(0,0,0,0.35)';
   box.style.lineHeight = '1.4';
+  box.style.whiteSpace = 'pre-wrap';
+  box.style.wordBreak = 'break-word';
   box.style.pointerEvents = 'none';
   if (vertical) {
     box.style.writingMode = 'vertical-rl';
@@ -307,4 +361,25 @@ function waitForImage(img: HTMLImageElement): Promise<boolean> {
     img.addEventListener('load', onLoad, { once: true });
     img.addEventListener('error', onError, { once: true });
   });
+}
+
+// Wait until the image has a non-zero client rect so overlays can be sized correctly.
+async function waitForLayout(img: HTMLImageElement, timeoutMs = 1500): Promise<boolean> {
+  const start = performance.now();
+  while (performance.now() - start < timeoutMs) {
+    const rect = img.getBoundingClientRect();
+    if (rect.width > 2 && rect.height > 2) return true;
+    await new Promise(res => requestAnimationFrame(res));
+  }
+  return false;
+}
+
+// Wait for the overlay element to acquire layout (non-zero size).
+async function waitForOverlay(el: HTMLDivElement, timeoutMs = 1000): Promise<boolean> {
+  const start = performance.now();
+  while (performance.now() - start < timeoutMs) {
+    if (el.clientWidth > 2 && el.clientHeight > 2) return true;
+    await new Promise(res => requestAnimationFrame(res));
+  }
+  return false;
 }

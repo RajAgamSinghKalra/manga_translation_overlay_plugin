@@ -7,6 +7,15 @@ env.useBrowserCache = true;
 // Rely on remote hosted models (HuggingFace) so we don't accidentally try to
 // pull relative to the website (eg: https://<page>/models/...)
 env.allowLocalModels = false;
+// Prefer a small, fast WASM setup (SIMD + multi-thread) for CPU speed; fallback gracefully if not supported.
+if (env.backends?.onnx?.wasm) {
+    // Force single-threaded WASM to avoid SharedArrayBuffer/worker import issues in MV3.
+    const threads = 1;
+    env.backends.onnx.wasm.numThreads = threads;
+    env.backends.onnx.wasm.simd = true;
+    // Avoid the worker proxy to reduce overhead on small models.
+    env.backends.onnx.wasm.proxy = false;
+}
 // Suppress noisy ONNXRuntime warnings about pruned initializers; keep real errors visible.
 if (env.backends?.onnx) {
     env.backends.onnx.logLevel = 'fatal';
@@ -15,34 +24,64 @@ if (env.backends?.onnx) {
 // Don't set cacheDir - let Transformers.js handle caching via IndexedDB/Cache API
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let translator: any = null;
+const translatorCache: Record<string, any> = {};
 
 const LANG_MAP: Record<string, string> = {
-    // m2m100 expects short ISO codes (not _Latn variants)
-    'jp': 'ja',
-    'ja': 'ja',
-    'en': 'en',
-    'kr': 'ko',
-    'ko': 'ko',
-    'cn': 'zh',
-    'zh': 'zh',
-    'fr': 'fr',
-    'es': 'es',
+    // Normalize incoming codes to short ISO variants for model selection
+    jp: 'ja',
+    ja: 'ja',
+    en: 'en',
+    kr: 'ko',
+    ko: 'ko',
+    cn: 'zh',
+    zh: 'zh',
+    fr: 'fr',
+    es: 'es',
 };
 
-export async function initTranslator() {
+// Use tiny bilingual Marian models (quantized) for speed/CPU-only usage.
+// These are far smaller than M2M100 and start up much faster in-browser.
+const MODEL_MAP: Record<string, string> = {
+    'ja->en': 'Xenova/opus-mt-ja-en',
+    'en->ja': 'Xenova/opus-mt-en-ja',
+    'ko->en': 'Xenova/opus-mt-ko-en',
+    'en->ko': 'Xenova/opus-mt-en-ko',
+    'zh->en': 'Xenova/opus-mt-zh-en',
+    'en->zh': 'Xenova/opus-mt-en-zh',
+};
+
+// Fallback covers any other language pairs (bigger, but more general)
+const FALLBACK_MODEL = 'Xenova/m2m100_418M';
+
+function normalizeLang(code: string) {
+    return LANG_MAP[code] || code;
+}
+
+function getModelId(src: string, tgt: string) {
+    const key = `${src}->${tgt}`;
+    return MODEL_MAP[key] || FALLBACK_MODEL;
+}
+
+export async function initTranslator(source = 'ja', target = 'en') {
     // Only used if remote translation fails; avoid initializing by default to spare GPU/CPU.
-    if (translator) return translator;
-    console.log('Loading local fallback translation model (only if remote fails)...');
-    translator = await pipeline('translation', 'Xenova/m2m100_418M');
-    console.log('Local fallback model loaded.');
-    return translator;
+    const src = normalizeLang(source);
+    const tgt = normalizeLang(target);
+    const modelId = getModelId(src, tgt);
+
+    if (translatorCache[modelId]) return translatorCache[modelId];
+
+    console.log(`Loading local translation model (${modelId}) for ${src} -> ${tgt}...`);
+    translatorCache[modelId] = await pipeline('translation', modelId, {
+        quantized: true, // prefer smaller weights for CPU/WebAssembly
+    });
+    console.log(`Local model loaded: ${modelId}`);
+    return translatorCache[modelId];
 }
 
 export async function translateText(text: string, source: string, target: string) {
     try {
-        const srcLang = LANG_MAP[source] || source;
-        const tgtLang = LANG_MAP[target] || target;
+        const srcLang = normalizeLang(source);
+        const tgtLang = normalizeLang(target);
 
         console.log(`Translating from ${srcLang} to ${tgtLang}: "${text}"`);
 
@@ -61,11 +100,8 @@ export async function translateText(text: string, source: string, target: string
         }
 
         // Fallback to local model only if remote fails.
-        const model = await initTranslator();
-        const output = await model(text, {
-            src_lang: srcLang,
-            tgt_lang: tgtLang,
-        });
+        const model = await initTranslator(srcLang, tgtLang);
+        const output = await model(text);
         console.log('Translation output (local fallback):', output);
 
         let translated = output[0].translation_text;
@@ -108,17 +144,9 @@ async function translateViaLibre(text: string, source: string, target: string): 
             action: 'TRANSLATE_REMOTE',
             payload: { text, source, target }
         }, (response) => {
-            if (chrome.runtime.lastError) {
-                console.warn('Background script not reachable:', chrome.runtime.lastError);
-                resolve(null);
-                return;
-            }
-            if (response && response.success) {
-                resolve(response.data);
-            } else {
-                console.warn('Remote translation error:', response?.error);
-                resolve(null);
-            }
+            if (chrome.runtime.lastError) return resolve(null);
+            if (response && response.success) return resolve(response.data);
+            resolve(null);
         });
     });
 }
@@ -137,40 +165,69 @@ export async function performOCR(imageBlob: Blob | string, lang: string = 'jpn')
     const tessLang = TESS_LANG_MAP[lang] || lang || 'eng';
     console.log(`Performing OCR (${tessLang})...`);
 
+    // If we're running on an extension page (chrome-extension://), use packaged assets.
+    // On normal webpages, use CDN to avoid cross-origin worker restrictions.
+    const isExtensionPage = typeof location !== 'undefined' && location.protocol === 'chrome-extension:';
+
+    const packagedConfig = {
+        workerPath: chrome.runtime.getURL('tesseract/worker.min.js'),
+        corePath: chrome.runtime.getURL('tesseract/tesseract-core.wasm.js'),
+        langPath: chrome.runtime.getURL('tesseract/lang-data'),
+        gzip: false,
+        workerBlobURL: false,
+    };
+
+    const cdnConfig = {
+        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/worker.min.js',
+        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@4.0.3/tesseract-core.wasm.js',
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+        gzip: true,
+        workerBlobURL: true,
+    };
+
+    const primaryConfig = isExtensionPage ? packagedConfig : cdnConfig;
+    const secondaryConfig = isExtensionPage ? cdnConfig : packagedConfig;
+
     try {
-        const worker = await Tesseract.createWorker(tessLang, 1, {
-            workerPath: chrome.runtime.getURL('tesseract/worker.min.js'),
-            corePath: chrome.runtime.getURL('tesseract/tesseract-core.wasm.js'),
-            langPath: chrome.runtime.getURL('tesseract/lang-data'),
-            gzip: false, // Use local uncompressed files, don't try to fetch .gz from CDN
-            logger: m => console.log(m),
-        });
-
-        // Configure Tesseract to extract detailed layout information
-        await worker.setParameters({
-            tessedit_pageseg_mode: Tesseract.PSM.AUTO, // Auto page segmentation with OSD
-        });
-
+        const worker = await createTessWorker(tessLang, primaryConfig);
         const ret = await worker.recognize(imageBlob);
         console.log('OCR Complete', ret.data);
         await worker.terminate();
         return ret.data;
-    } catch (error) {
-        console.error('OCR Error:', error);
-        console.error('Worker path:', chrome.runtime.getURL('tesseract/worker.min.js'));
-        console.error('Core path:', chrome.runtime.getURL('tesseract/tesseract-core.wasm.js'));
-        console.error('Lang path:', chrome.runtime.getURL('tesseract/lang-data'));
-        throw error;
+    } catch (primaryError) {
+        console.warn('Primary OCR worker failed, retrying with alternate assets...', primaryError);
+        const worker = await createTessWorker(tessLang, secondaryConfig);
+        const ret = await worker.recognize(imageBlob);
+        console.log('OCR Complete (fallback)', ret.data);
+        await worker.terminate();
+        return ret.data;
     }
 }
 
+async function createTessWorker(tessLang: string, paths: { workerPath: string; corePath: string; langPath: string; gzip: boolean; workerBlobURL: boolean; }) {
+    const worker = await Tesseract.createWorker(tessLang, 1, {
+        ...paths,
+        logger: m => console.log(m),
+    });
+
+    await worker.setParameters({
+        // Sparse multi-block detection without auto-rotation; keeps bbox coordinates aligned to the source image.
+        tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
+        preserve_interword_spaces: '1',
+    });
+
+    return worker;
+}
+
 export async function isModelReady(): Promise<boolean> {
-    return translator !== null;
+    return Object.keys(translatorCache).length > 0;
 }
 
 export async function forceDownloadModel(): Promise<void> {
-    // Clear any existing model reference
-    translator = null;
+    // Clear any existing model references
+    for (const key of Object.keys(translatorCache)) {
+        delete translatorCache[key];
+    }
     // Temporarily disable local model caching to force fresh download
     const previousAllowLocal = env.allowLocalModels;
     env.allowLocalModels = false;

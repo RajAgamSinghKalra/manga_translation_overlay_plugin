@@ -17,18 +17,21 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         })
-            .then(response => {
+            .then(async response => {
                 if (!response.ok) {
                     throw new Error(`LibreTranslate HTTP ${response.status}`);
                 }
-                return response.json();
-            })
-            .then(data => {
+                const contentType = response.headers.get('content-type') || '';
+                const textResp = await response.text();
+                if (!contentType.includes('application/json')) {
+                    throw new Error('LibreTranslate returned non-JSON response');
+                }
+                const data = JSON.parse(textResp);
                 sendResponse({ success: true, data: data.translatedText });
             })
             .catch(error => {
-                console.error('Remote translation failed:', error);
-                sendResponse({ success: false, error: error.message });
+                console.warn('Remote translation failed:', error?.message || error);
+                sendResponse({ success: false, error: error?.message });
             });
 
         return true; // Will respond asynchronously
