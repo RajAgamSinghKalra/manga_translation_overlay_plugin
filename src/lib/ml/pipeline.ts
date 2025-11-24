@@ -46,6 +46,12 @@ export async function translateText(text: string, source: string, target: string
 
         console.log(`Translating from ${srcLang} to ${tgtLang}: "${text}"`);
 
+        // Input Sanitization: Don't even try to translate garbage
+        if (text.includes('SQ of the') || text.includes('The SQ')) {
+            console.warn('Skipping translation of known hallucination pattern:', text);
+            return null;
+        }
+
         // Prefer free remote translator to avoid local GPU/CPU.
         try {
             const remote = await translateViaLibre(text, srcLang, tgtLang);
@@ -61,7 +67,35 @@ export async function translateText(text: string, source: string, target: string
             tgt_lang: tgtLang,
         });
         console.log('Translation output (local fallback):', output);
-        return output[0].translation_text;
+
+        let translated = output[0].translation_text;
+
+        // Check for repetition loops (e.g. "The SQ of the SQ of the SQ")
+        if (translated.length > 50) {
+            // 1. Check for simple repeated halves
+            const words = translated.split(' ');
+            const half = Math.floor(words.length / 2);
+            if (words.length > 10) {
+                const firstHalf = words.slice(0, half).join(' ');
+                const secondHalf = words.slice(half, half * 2).join(' ');
+                if (firstHalf === secondHalf) return null;
+            }
+
+            // 2. Check for repeating n-grams (more robust)
+            // Look for any 4-word sequence that appears 3 or more times
+            if (words.length > 12) {
+                for (let i = 0; i < words.length - 4; i++) {
+                    const chunk = words.slice(i, i + 4).join(' ');
+                    const matches = translated.split(chunk).length - 1;
+                    if (matches >= 3) {
+                        console.warn('Detected translation loop (n-gram), discarding:', translated);
+                        return null;
+                    }
+                }
+            }
+        }
+
+        return translated;
     } catch (error) {
         console.error('Translation error:', error);
         throw error;

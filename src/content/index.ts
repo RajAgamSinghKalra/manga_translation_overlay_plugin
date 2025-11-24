@@ -115,12 +115,34 @@ async function processImage(img: HTMLImageElement, sourceLang: string, targetLan
     const scaleY = overlay.clientHeight / sourceHeight;
 
     if (blocks.length === 0) {
+      // Strict Fallback: Don't translate if confidence is low or text is garbage
+      if (ocrResult.confidence < 30 || isGarbage(cleanText)) {
+        console.log('Skipping fallback translation: Low confidence or garbage text detected.', ocrResult.confidence);
+        return;
+      }
+
       const translatedText = await translateText(cleanText, sourceLang, targetLang);
-      console.log('Translation complete (fallback single block):', translatedText);
-      overlay.appendChild(makeOverlayBox(10, 10, overlay.clientWidth - 20, translatedText, undefined, overlay.clientWidth, overlay.clientHeight));
+      if (translatedText) {
+        console.log('Translation complete (fallback single block):', translatedText);
+        overlay.appendChild(makeOverlayBox(10, 10, overlay.clientWidth - 20, translatedText, undefined, overlay.clientWidth, overlay.clientHeight));
+      }
     } else {
-      for (const block of blocks) {
-        const translatedText = await translateText(block.text, sourceLang, targetLang);
+      // Parallelize translation requests
+      const translationPromises = blocks.map(async (block) => {
+        try {
+          const translatedText = await translateText(block.text, sourceLang, targetLang);
+          return { block, translatedText };
+        } catch (err) {
+          console.error('Failed to translate block:', block.text, err);
+          return null;
+        }
+      });
+
+      const results = await Promise.all(translationPromises);
+
+      for (const result of results) {
+        if (!result) continue;
+        const { block, translatedText } = result;
         const x = block.bbox.x0 * scaleX;
         const y = block.bbox.y0 * scaleY;
         const w = (block.bbox.x1 - block.bbox.x0) * scaleX;
@@ -148,25 +170,90 @@ async function processImage(img: HTMLImageElement, sourceLang: string, targetLan
   }
 }
 
+// Helper to detect garbage text
+const isGarbage = (text: string) => {
+  if (!text) return true;
+  if (text.length < 2 && !/[a-zA-Z0-9\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uff00-\uff9f\u4e00-\u9faf]/.test(text)) return true; // Single char non-alphanumeric/non-japanese
+  if (/^[^a-zA-Z0-9\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uff00-\uff9f\u4e00-\u9faf]+$/.test(text)) return true; // Only symbols
+  if (/^(.)\1+$/.test(text) && text.length > 3) return true; // Repeated characters like "HHHHH"
+
+  // Explicitly blacklist known hallucination patterns
+  if (text.includes('SQ of the') || text.includes('The SQ')) return true;
+
+  // Detect repeated phrases (e.g., "SQ of the SQ of the SQ")
+  const words = text.split(' ');
+  if (words.length > 6) {
+    const half = Math.floor(words.length / 2);
+    const firstHalf = words.slice(0, half).join(' ');
+    const secondHalf = words.slice(half, half * 2).join(' ');
+    if (firstHalf === secondHalf) return true;
+  }
+
+  return false;
+};
+
 function extractBlocks(ocrResult: any) {
   const normalize = (text: string) => text?.replace(/\s+/g, ' ').trim() || '';
+
   const mapItems = (items: any) => {
     const arr = Array.isArray(items) ? items : [];
+    const imgWidth = (ocrResult as any)?.imageSize?.width || 1000; // Default if missing
+    const imgHeight = (ocrResult as any)?.imageSize?.height || 1000;
+
     return arr
       .map(item => ({
         bbox: item?.bbox,
         text: normalize(item?.text),
         confidence: item?.confidence ?? item?.conf ?? 0,
       }))
-      .filter(b => b.text.length > 0 && b.bbox && b.confidence >= 0);
+      .filter(b => {
+        if (b.text.length === 0 || !b.bbox) return false;
+        if (b.confidence < 30) {
+          console.log('Filtered block (low confidence):', b.text, b.confidence);
+          return false;
+        }
+        if (isGarbage(b.text)) {
+          console.log('Filtered block (garbage):', b.text);
+          return false;
+        }
+
+        const w = b.bbox.x1 - b.bbox.x0;
+        const h = b.bbox.y1 - b.bbox.y0;
+
+        // 1. Size Limit: Ignore blocks covering > 50% of the image area
+        const blockArea = w * h;
+        const imgArea = imgWidth * imgHeight;
+        if (blockArea > (imgArea * 0.5)) {
+          console.log('Filtered block (too large):', b.text);
+          return false;
+        }
+
+        // 2. Edge Filtering: Ignore blocks touching the very edges (often borders)
+        // Allow a small margin of error (e.g., 2px)
+        if (b.bbox.x0 <= 2 || b.bbox.y0 <= 2 || b.bbox.x1 >= imgWidth - 2 || b.bbox.y1 >= imgHeight - 2) {
+          return false;
+        }
+
+        // 3. Aspect Ratio: Ignore extremely thin/tall blocks
+        if (w > 0 && h > 0) {
+          const ratio = w / h;
+          if (ratio > 20 || ratio < 0.05) return false;
+        }
+
+        return true;
+      });
   };
 
   const data = ocrResult || {};
-  // Prefer word-level for precise placement; fall back to lines/paragraphs.
-  let items = mapItems(data.words);
-  if (items.length === 0) items = mapItems(data.lines);
-  if (items.length === 0) items = mapItems(data.paragraphs);
+
+  // Prioritize larger blocks (paragraphs/blocks) to capture full speech bubbles
+  // instead of fragmented words.
+  let items = mapItems(data.paragraphs);
   if (items.length === 0) items = mapItems(data.blocks);
+  if (items.length === 0) items = mapItems(data.lines);
+  // Only fall back to words if absolutely nothing else was found, but usually words are too fragmented.
+  if (items.length === 0) items = mapItems(data.words);
+
   return items;
 }
 
